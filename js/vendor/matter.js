@@ -6654,6 +6654,9 @@ var decomp = (typeof window !== "undefined" ? window['decomp'] : typeof global !
                 // use the quick decomposition algorithm (Bayazit)
                 var decomposed = decomp.quickDecomp(concave);
 
+                if(decomposed.length === 0)
+                    debugger;
+                
                 // for each decomposed chunk
                 for (i = 0; i < decomposed.length; i++) {
                     var chunk = decomposed[i];

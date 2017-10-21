@@ -23,6 +23,49 @@
 		<script type="text/javascript" src="js/vendor/matter.js"></script>
 		<script type="text/javascript">
 			var Vector = Matter.Vector;
+			
+			function SliceTransformer(original_length, knife) {
+				this.original_length = original_length;
+				
+				this.knife = knife;
+				this.knife.sort();
+			}
+			SliceTransformer.prototype.is_on_wraparound = function(P) {
+				return !(P > this.knife[0] && P < this.knife[1]);
+			}
+			SliceTransformer.prototype.transform = function(P) {
+				if(this.is_on_wraparound(P)) {
+					// on the wraparound slice
+					if(Math.floor(this.knife[1]) < P && P < Math.ceil(this.knife[1]))
+						return Math.ceil(this.knife[1]) + (P - this.knife[1]) / (Math.ceil(this.knife[1]) - this.knife);
+					else
+						return (P + this.original_length * (P < this.knife[0])) - Math.ceil(this.knife[1]); // ceil because the knife point is the last point added by arbitrary convention
+				}
+				else {
+					// on the continuous slice
+					return P - Math.ceil(this.knife[0]); // ceil because the knife point is the last point added by arbitrary convention
+				}
+			}
+			SliceTransformer.prototype.transform_knife = function(K) {
+				// mutation of knife
+				K.bounds[0] = K.bounds[0] && this.transform(K.bounds[0]);
+				K.bounds[1] = K.bounds[1] && this.transform(K.bounds[1]);
+				
+				for(var i = 0; i < K.interior.length; i++) {
+					K.interior[i] = this.transform(K.interior[i]);
+				}
+				
+				return K;
+			}
+			
+			/*
+			type Knife = {
+				target: Body,
+				bounds: [Vector, Vector],
+				interior: ?Vector[]
+			};
+			*/
+			
 			function intersect(target, knife) {
 				// thanks https://stackoverflow.com/a/565282/3925507 !
 				var knife_delta = Vector.sub(knife[1], knife[0]);
@@ -41,9 +84,8 @@
 					knife_delta,
 					target_delta
 				);
-				if(0 <= t && t <= 1 && 0 <= u && u <= 1) {
-					return u; // only interested in target parameter
-				}
+				if(0 <= t && t < 1 && 0 <= u && u < 1)
+					return [u, t]; // target param, knife param
 				else
 					return null;
 			}
@@ -56,34 +98,34 @@
 						return Vector.sub(V, position);
 					}),
 					bary_bounds: bary_bounds,
-					original_position: position,
 					prev: {
 						position: position,
 						angle: 0.0
 					}
 				};
 			}
-			function might_slice(bound, knife) {
-				var bound_flags = [
+			function might_slice(bound, knife_leader) {
+				var knife_regions = [
 					[
-						knife[0].x > bound.min.x && knife[0].x < bound.max.x,
-						knife[0].y > bound.min.y && knife[0].y < bound.max.y,
+						+(knife_leader[0].x >= bound.min.x) + (+(knife_leader[0].x <= bound.max.x) << 1),
+						+(knife_leader[0].y >= bound.min.y) + (+(knife_leader[0].y <= bound.max.y) << 1),
 					],
 					[
-						knife[1].x > bound.min.x && knife[1].x < bound.max.x,
-						knife[1].y > bound.min.y && knife[1].y < bound.max.y
+						+(knife_leader[1].x >= bound.min.x) + (+(knife_leader[1].x <= bound.max.x) << 1),
+						+(knife_leader[1].y >= bound.min.y) + (+(knife_leader[1].y <= bound.max.y) << 1)
 					]
 				];
 				if(
-					bound_flags[0][0] && bound_flags[0][1] &&
-					bound_flags[1][0] && bound_flags[1][1]
+					knife_regions[0][0] === 3 && knife_regions[0][1] === 3 &&
+					knife_regions[1][0] === 3 && knife_regions[1][1] === 3
 				)
 					return true;
 				else if(
-					bound_flags[0].toString() !== bound_flags[1].toString() && (
-						bound_flags[0][0] || bound_flags[0][1] &&
-						bound_flags[1][0] || bound_flags[1][1]
-					)
+					(( knife_regions[0].includes(3) || knife_regions[1].includes(3) ) &&
+					  knife_regions[0][0] !== knife_regions[0][1] ||
+					  knife_regions[1][0] !== knife_regions[1][1] ) ||
+					( knife_regions[0][0] !== knife_regions[0][1] &&
+					  knife_regions[1][0] !== knife_regions[1][1] )
 				)
 					return true;
 				
@@ -92,34 +134,145 @@
 			function barycentrify(frame, point) {
 				return Vector.rotate(Vector.sub(point, frame.position), -frame.angle);
 			}
-			function update(frame, meta) {
-				return meta.vertices.map(function(V) {
-					return Vector.rotate(
-						Vector.add(V, Vector.sub(meta.original_position, frame.position)),
-						frame.angle
-					)
-				})
+			function worldify(frame, point) {
+				return Vector.add(Vector.rotate(point, frame.angle), frame.position);
 			}
-			// window.addEventListener('resize', on_resize_reload);
-			window.addEventListener('load', function() {
-				// on_resize_reload();
+			function sgn(v) {
+				return v < 0 ? -1 : 1;
+			}
+			function mantissa(v) {
+				return v - sgn(v) * Math.floor(Math.abs(v));
+			}
+			function slice(vertices, knife) {
+				var cut_points = [
+					Vector.add(
+						Vector.mult(
+							vertices[Math.floor(knife.bounds[0])],
+							1 - mantissa(knife.bounds[0])
+						),
+						Vector.mult(
+							vertices[Math.ceil(knife.bounds[0]) % vertices.length],
+							mantissa(knife.bounds[0])
+						)
+					),
+					Vector.add(
+						Vector.mult(
+							vertices[Math.floor(knife.bounds[1])],
+							1 - mantissa(knife.bounds[1])
+						),
+						Vector.mult(
+							vertices[Math.ceil(knife.bounds[1]) % vertices.length],
+							mantissa(knife.bounds[1])
+						)
+					)
+				];
+				var cut_line = [cut_points[0]].concat(knife.interior || []).concat([cut_points[1]]);
+				cut_line = cut_line.slice(+(Math.abs(0.5 - mantissa(knife.bounds[0])) > 0.5 - 1E-6), cut_line.length - (Math.abs(0.5 - (mantissa(knife.bounds[1])) > 0.5 - 1E-6)));
+					// eliminate cut points if they're [almost] vertices
 				
+				var cts_slice = vertices.slice(
+					Math.ceil(Math.min.apply(null, knife.bounds)),
+					Math.ceil(Math.max.apply(null, knife.bounds))
+				).concat(
+					knife.bounds[0] > knife.bounds[1] ?
+						cut_line :
+						cut_line.slice(0).reverse()
+				);
+				var wraparound_slice = vertices.slice(
+					Math.ceil(Math.max.apply(null, knife.bounds))
+				).concat(
+					vertices.slice(0, Math.ceil(Math.min.apply(null, knife.bounds)))
+				).concat(
+					knife.bounds[0] > knife.bounds[1] ?
+						cut_line.slice(0).reverse() :
+						cut_line
+				);
+				return {
+					cts_slice: cts_slice,
+					wraparound_slice: wraparound_slice,
+					transformer: new SliceTransformer(vertices.length, knife.bounds)
+				};
+			}
+			function tree_slice(original_body, body_vertices, knives, knife_edge) { // out knife_edge
+				// I dislike knife_edge... but whatever.
+				if(knives.length === 0) {
+					var worldified_body_vertices = body_vertices.map(function(V) {
+						return worldify(original_body, V);
+					})
+					var center = Matter.Vertices.centre(worldified_body_vertices);
+					var body = Matter.Bodies.fromVertices(center.x, center.y, worldified_body_vertices);
+					if(body == null) {
+						debugger;
+					}
+					var body_meta = make_body_meta(worldified_body_vertices);
+					
+					// mutate knife_edge
+					if(knife_edge != null) {
+						knife_edge.target = body;
+						for(var i = 0; i < knife_edge.interior.length; i++) {
+							knife_edge.interior[i] = barycentrify(body, worldify(original_body, knife_edge.interior[i]));
+						}
+					}
+					
+					return [ {
+						body: body,
+						body_meta: body_meta
+					} ];
+				}
+				
+				var subslices = slice(body_vertices, knives[0]);
+				
+				var cts_slice_knives = [];
+				var wraparound_slice_knives = [];
+				for(var i = 1; i < knives.length; i++) {
+					// note subslices.knife sorted, whereas knives[0] might not be
+					// suffices to check the 0th bound: both must lie on the same daughter body
+					if(subslices.transformer.knife[0] < knives[i].bounds[0] && knives[i].bounds[0] < subslices.transformer.knife[1]) {
+						var knife_drawer = cts_slice_knives;
+					}
+					else {
+						var knife_drawer = wraparound_slice_knives;
+					}
+					
+					knife_drawer.push(subslices.transformer.transform_knife(knives[i]));
+				}
+				
+				if(knife_edge != null) {
+					subslices.transformer.transform_knife(knife_edge);
+					
+					var cts_slice_knife_edge = null;
+					var wraparound_slice_knife_edge = null;
+					if(subslices.transformer.knife[0] < knife_edge.bounds[0] && knife_edge.bounds[0] < subslices.transformer.knife[1])
+						cts_slice_knife_edge = knife_edge;
+					else
+						wraparound_slice_knife_edge = knife_edge;
+				}
+				// debugger;
+				return tree_slice(original_body, subslices.cts_slice, cts_slice_knives, cts_slice_knife_edge).concat(
+					tree_slice(original_body, subslices.wraparound_slice, wraparound_slice_knives, wraparound_slice_knife_edge)
+				);
+			}
+			
+			window.addEventListener('load', function() {
 				var engine = Matter.Engine.create();
+				var overlay = document.getElementById('overlay');
+				var overlay_ctx = overlay.getContext('2d');
 				// engine.world.gravity.y = 0;
+				overlay.width = window.innerWidth;
+				overlay.height = window.innerHeight;
 				var render = Matter.Render.create({
 					element: document.body,
 					engine: engine,
 					options: {
-						wireframes: false,
+						// wireframes: false,
 						width: window.innerWidth,
 						height: window.innerHeight
 					}
 				});
 				var mouse = Matter.Mouse.create(document.body);
 				(function() {
-					var active_line = null; // { entry_cut: ?number, interior: Vector[] };
-					var active_body = null; // number
-					var knife = [ mouse.absolute ];
+					var active_knife = null; // ?Knife
+					var knife_leader = [ Vector.clone(mouse.absolute) ];
 					
 					var original = Matter.Bodies.rectangle(window.innerWidth / 2, window.innerHeight / 2, window.innerWidth / 2, window.innerHeight / 2, {
 						render: { fillStyle: '#FF0000' },
@@ -129,217 +282,178 @@
 					Matter.World.addBody(engine.world, original);
 					var body_meta = [ make_body_meta(original.vertices) ]; // expect convex beginning shape
 					
+					// window.addEventListener('click', function(e) {
+					// 	if(knife_leader.length > 1)
+					// 		knife_leader = [ knife_leader[1], Vector.clone(mouse.absolute) ];
+					// 	else
+					// 		knife_leader.push(Vector.clone(mouse.absolute));
+						
+					// 	overlay_ctx.beginPath();
+					// 		overlay_ctx.strokeStyle = '#00F';
+					// 		overlay_ctx.moveTo(knife_leader[0].x, knife_leader[0].y);
+					// 		overlay_ctx.lineTo(knife_leader[1].x, knife_leader[1].y);
+					// 		overlay_ctx.stroke();
+					// });
+					
 					(function anim_loop() {
+						
 						window.requestAnimationFrame(anim_loop);
 						Matter.Engine.update(engine, 1000 / 60);
 						
-						if(knife.length > 1) {
-							knife = [ knife[1], Vector.clone(mouse.absolute) ];
-							// knife = [ Vector.create(window.innerWidth / 2, window.innerHeight * 0.7), Vector.create(window.innerWidth / 2, window.innerHeight * 0.7) ];
-							
-							var slices = []; // Array<{ outgoing: number, incoming: Body[] }>
+						if(knife_leader.length > 1) {
+							knife_leader = [ knife_leader[1], Vector.clone(mouse.absolute) ];
+							var slices = []; // Array<{ outgoing: number, incoming: Vector[][] }>
 							var bodies = Matter.Composite.allBodies(engine.world);
 							
-							// console.log(active_body);
-							var next_active_line = active_line;
-							var next_active_body = active_body;
+							var next_active_knife = active_knife;
 							for(var i = 0; i < bodies.length; i++) {
-								var bary_knife = [
-									barycentrify(body_meta[i].prev, knife[0]),
-									barycentrify(bodies[i], knife[1])
+								var bary_knife_leader = [
+									barycentrify(body_meta[i].prev, knife_leader[0]),
+									barycentrify(bodies[i], knife_leader[1])
 								];
 								body_meta[i].prev = {
 									position: Vector.clone(bodies[i].position),
 									angle: bodies[i].angle
 								};
-								
-								if(might_slice(body_meta[i].bary_bounds, bary_knife)) {
-									var cuts = [];
-									var new_vertices = [];
-									for(var j = 0; j < body_meta[i].vertices.length; j++) {
-										var t = intersect(
-											[
-												body_meta[i].vertices[j],
-												body_meta[i].vertices[(j + 1) % body_meta[i].vertices.length]
-											],
-											bary_knife
-										);
-										// if(j === 0) {
-										// 	console.log(JSON.stringify([
-										// 		body_meta[i].vertices[j],
-										// 		body_meta[i].vertices[(j + 1) % body_meta[i].vertices.length]
-										// 	]), JSON.stringify(bary_knife));
-										// }
-										if(t != null) {
-											// console.log('CUT!');
-											cuts.push(j + t);
-											if(active_body === bodies[i] && cuts.length === 1 && active_line.interior.length > 0) {
-												var cut_points = [
-													Vector.add(
-														Vector.mult(
-															body_meta[i].vertices[Math.floor(active_line.entry_cut)],
-															1 - active_line.entry_cut + Math.floor(active_line.entry_cut)
-														),
-														Vector.mult(
-															body_meta[i].vertices[Math.ceil(active_line.entry_cut) % body_meta[i].vertices.length],
-															active_line.entry_cut - Math.floor(active_line.entry_cut)
-														)
-													),
-													Vector.add(
-														Vector.mult(
-															body_meta[i].vertices[j],
-															1 - t
-														),
-														Vector.mult(
-															body_meta[i].vertices[(j + 1) % body_meta[i].vertices.length],
-															t
-														)
-													)
-												];
-												var cut_line = [cut_points[0]].concat(active_line.interior).concat([cut_points[1]]);
-												
-												new_vertices.splice(
-													new_vertices.length,
-													0,
-													// continuous curve (without wraparound 0; subcurve from body is necessarily clockwise)
-													body_meta[i].vertices.slice(
-														Math.ceil(Math.min(active_line.entry_cut, j + t)),
-														Math.ceil(Math.max(active_line.entry_cut, j + t)) // TODO: must compensate potentially for missing 1st point from rounding up somewhere between length - 1 and length
-													).concat(
-														active_line.entry_cut > j + t ?
-															cut_line :
-															cut_line.slice(0).reverse()
-													).map(function(V) {
-														return Vector.add(Vector.rotate(V, bodies[i].angle), bodies[i].position);
-													}),
-													// discontinuous curve (wraparound 0)
-													body_meta[i].vertices.slice(
-														Math.ceil(Math.max(active_line.entry_cut, j + t))
-													).concat(
-														body_meta[i].vertices.slice(0, Math.ceil(Math.min(active_line.entry_cut, j + t)))
-													).concat(
-														active_line.entry_cut > j + t ?
-															cut_line.slice(0).reverse() :
-															cut_line
-													).map(function(V) {
-														return Vector.add(Vector.rotate(V, bodies[i].angle), bodies[i].position);
-													})
-												)
-											}
-											else if(active_body !== bodies[i] && cuts.length % 2 === 0 && cuts.length > 0) {
-												// a lot of repetition tbh
-												var entry_cut = cuts[cuts.length - 2];
-												var cut_points = [
-													Vector.add(
-														Vector.mult(
-															body_meta[i].vertices[Math.floor(entry_cut)],
-															1 - entry_cut + Math.floor(entry_cut)
-														),
-														Vector.mult(
-															body_meta[i].vertices[Math.ceil(entry_cut)],
-															entry_cut - Math.floor(entry_cut)
-														)
-													),
-													Vector.add(
-														Vector.mult(
-															body_meta[i].vertices[j],
-															1 - t
-														),
-														Vector.mult(
-															body_meta[i].vertices[(j + 1) % body_meta[i].vertices.length],
-															t
-														)
-													)
-												];
-												new_vertices.splice(
-													new_vertices.length,
-													0,
-													// continuous curve (without wraparound 0; subcurve from body is necessarily clockwise)
-													body_meta[i].vertices.slice(
-														Math.ceil(Math.min(entry_cut, j + t)),
-														Math.ceil(Math.max(entry_cut, j + t)) // TODO: must compensate potentially for missing 1st point from rounding up somewhere between length - 1 and length
-													).concat(
-														entry_cut > j + t ?
-															cut_points :
-															cut_points.reverse()
-													).map(function(V) {
-														return Vector.add(Vector.rotate(V, bodies[i].angle), bodies[i].position);
-													}),
-													body_meta[i].vertices.slice(
-														Math.ceil(Math.max(entry_cut, j + t))
-													).concat(
-														body_meta[i].vertices.slice(0, Math.ceil(Math.min(entry_cut, j + t)))
-													).concat(
-														entry_cut > j + t ?
-															cut_points.reverse() :
-															cut_points
-													).map(function(V) {
-														return Vector.add(Vector.rotate(V, bodies[i].angle), bodies[i].position);
-													})
-												);
+								if(Vector.magnitude(Vector.sub(bary_knife_leader[1], bary_knife_leader[0])) > 0) {
+									if(might_slice(body_meta[i].bary_bounds, bary_knife_leader)) {
+										var cuts = []; // [ u: number, along: number ]
+										// console.log(body_meta, knife_leader, bary_knife_leader);
+										for(var j = 0; j < body_meta[i].vertices.length; j++) {
+											var parameters = intersect(
+												[
+													body_meta[i].vertices[j],
+													body_meta[i].vertices[(j + 1) % body_meta[i].vertices.length]
+												],
+												bary_knife_leader
+											);
+											if(parameters != null) {
+												var body_t = parameters[0], line_t = parameters[1];
+												cuts.push([line_t, j + body_t]);
 											}
 										}
-									}
-									
-									// console.log(i, active_body, cuts);
-									
-									if(new_vertices.length > 0) {
-										slices.push({
-											outgoing: i,
-											incoming: new_vertices
+										
+										cuts.sort(function(a, b) {
+											return a[0] - b[0];
 										});
-									}
-									if(active_body === bodies[i]) {
-										if(cuts.length % 2 === 1) {
-											// odd # cuts, exit this body
-											next_active_body = null;
-											next_active_line = null;
+										cuts = cuts.map(function(cut) {
+											return cut[1];
+										});
+										
+										if(cuts.length === 1) {
+											if(active_knife != null && active_knife.target === bodies[i]) {
+												// exit active body
+												// should_debug = bodies[i].angle !== 0;
+												
+												var subslices = slice(body_meta[i].vertices, Object.assign({}, active_knife, {
+													bounds: [ active_knife.bounds[0], cuts[0] ]
+												}));
+												var worldified_cts = subslices.cts_slice.map(function(V) {
+													return worldify(bodies[i], V);
+												});
+												var worldified_wraparound = subslices.wraparound_slice.map(function(V) {
+													return worldify(bodies[i], V);
+												});
+												var cts_center = Matter.Vertices.centre(worldified_cts);
+												var wraparound_center = Matter.Vertices.centre(worldified_wraparound);
+												
+												var cts_body = Matter.Bodies.fromVertices(cts_center.x, cts_center.y, worldified_cts);
+												var wraparound_body = Matter.Bodies.fromVertices(wraparound_center.x, wraparound_center.y, worldified_wraparound);
+												if(cts_body == null || wraparound_body == null)
+													debugger;
+												slices.push({
+													outgoing: i,
+													incoming: [ {
+														body: cts_body,
+														body_meta: make_body_meta(worldified_cts)
+													}, {
+														body: wraparound_body,
+														body_meta: make_body_meta(worldified_wraparound)
+													} ]
+												});
+												
+												if(next_active_knife != null && next_active_knife.target === bodies[i])
+													next_active_knife = null;
+											}
+											else
+												next_active_knife = {
+													target: bodies[i],
+													bounds: [ cuts[0], null ],
+													interior: [ bary_knife_leader[1] ]
+												};
 										}
-										else if(cuts.length % 2 === 0 && cuts.length > 0) {
-											next_active_line = {
-												entry_cut: cuts[cuts.length - 1],
-												interior: [ bary_knife[1] ] // TODO: this won't work because the barycenter could change after all the slicing
-											};
+										else if(cuts.length > 1) {
+											// debugger;
+											var knives = [];
+											if(active_knife != null && active_knife.target === bodies[i]) {
+												knives.push(Object.assign({}, active_knife, {
+													bounds: [ active_knife.bounds[0], cuts[0] ]
+												}));
+											}
+											for(var j = +(active_knife != null && active_knife.target === bodies[i]); j <= cuts.length - 2; j += 2) {
+												knives.push({
+													target: null, // purely placeholder
+													bounds: [cuts[j], cuts[j + 1]],
+													interior: []
+												});
+											}
+											
+											// knives are mutated
+											if(cuts.length % 2 === 1 - (active_knife != null && active_knife.target === bodies[i])) {
+												var next_active_knife = {
+													target: null, // to be populated
+													bounds: [cuts[cuts.length - 1], null], // terminal null is a bit ugly, but *shrug emoji*
+													interior: [bary_knife_leader[1]]
+												};
+											}
+											else {
+												next_active_knife = null;
+											}
+											// next_active_knife is mutated (transformed to target coordinates)
+											var subslices = tree_slice(bodies[i], body_meta[i].vertices, knives, next_active_knife);
+											slices.push({
+												outgoing: i,
+												incoming: subslices
+											});
 										}
-										else {
-											next_active_line.interior.push(bary_knife[1]);
+										else if(active_knife != null && active_knife.target === bodies[i]) {
+											active_knife.interior.push(bary_knife_leader[1]);
 										}
-									}
-									else if(active_body !== bodies[i] && cuts.length % 2 === 1) {
-										// mutually exclusive with staying in that other body
-										next_active_body = bodies[i];
-										next_active_line = {
-											entry_cut: cuts[cuts.length - 1],
-											interior: [ bary_knife[1] ]
-										};
 									}
 								}
 							}
-							active_line = next_active_line;
-							active_body = next_active_body;
+							active_knife = next_active_knife;
 							
 							for(var i = 0; i < slices.length; i++) {
+								overlay_ctx.clearRect(0, 0, overlay.width, overlay.height);
 								// assume outgoing from slices are ascending order
-								var should_be_static = bodies[slices[i].outgoing].isStatic ? Math.floor(Math.random() * slices[i].incoming.length) : -1;
+								var max_area = bodies[slices[i].outgoing].isStatic ? Math.max.apply(null, slices[i].incoming.map(function(B) {
+									return B.body.area;
+								})) : Infinity;
 								
 								body_meta.splice(slices[i].outgoing - i, 1);
 								Matter.Composite.removeBody(engine.world, bodies[slices[i].outgoing]);
 								for(var j = 0; j < slices[i].incoming.length; j++) {
-									body_meta.push(make_body_meta(slices[i].incoming[j]))
-									var center = Matter.Vertices.centre(slices[i].incoming[j]);
-									var body = Matter.Bodies.fromVertices(center.x, center.y, slices[i].incoming[j]);
-									if(body != null) {
-										Matter.Body.setStatic(body, j === should_be_static);
-										Matter.Body.setVelocity(body, bodies[slices[i].outgoing].velocity);
-										Matter.Body.setAngularVelocity(body, bodies[slices[i].outgoing].angularVelocity);
-										Matter.World.addBody(engine.world, body);
+									body_meta.push(slices[i].incoming[j].body_meta)
+									if(slices[i].incoming[j].body != null) {
+										Matter.Body.setStatic(slices[i].incoming[j].body, slices[i].incoming[j].body.area === max_area);
+										// Matter.Body.translate(slices[i].incoming[j].body, bodies[i].position);
+										Matter.Body.setVelocity(slices[i].incoming[j].body, bodies[slices[i].outgoing].velocity);
+										Matter.Body.setAngularVelocity(slices[i].incoming[j].body, bodies[slices[i].outgoing].angularVelocity);
+										Matter.World.addBody(engine.world, slices[i].incoming[j].body);
+										
+										overlay_ctx.beginPath();
+											overlay_ctx.fillStyle = '#0F0';
+											overlay_ctx.arc(slices[i].incoming[j].body.position.x, slices[i].incoming[j].body.position.y, 2, 0, Math.PI * 2);
+											overlay_ctx.fill();
 									}
 								}
 								// debugger;
 							}
+							// knife_leader = [knife_leader[1]];
 						}
-						else
-							knife.push(mouse.absolute);
+						else if(Vector.magnitude(Vector.sub(knife_leader[0], mouse.absolute)) > 0)
+							knife_leader.push(Vector.clone(mouse.absolute));
 					})();
 				})();
 				
@@ -351,5 +465,6 @@
 	<body>
 		<!-- <div class="marker" style="left:49%; top:49%; background-color:#00F;"></div>
 		<div class="marker" style="left:49%; top:69%; background-color:#0F0;"></div> -->
+		<canvas style="position:absolute; left:0; top:0; z-index:1" id="overlay"></canvas>
 	</body>
 </html>
