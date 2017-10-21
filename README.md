@@ -1,6 +1,6 @@
 ## Slice
 
-Using [matter.js](http://brm.io/matter-js/), **Slice** is a block that can be cut to your heart's desire by mouse pointer. The mouse pointer can slice falling blocks while staying totally still. **Try at [slice.lam.io](slice.lam.io).**
+Using [matter.js](http://brm.io/matter-js/), **Slice** is a block that can be cut to your heart's desire by mouse pointer. The mouse pointer can slice falling blocks while staying totally still. **Try at [slice.lam.io](http://slice.lam.io).**
 
 Soon to be tackled: self-intersecting mouse trajectories in polygons.
 
